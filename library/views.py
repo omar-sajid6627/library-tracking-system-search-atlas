@@ -5,14 +5,28 @@ from .serializers import AuthorSerializer, BookSerializer, MemberSerializer, Loa
 from rest_framework.decorators import action
 from django.utils import timezone
 from .tasks import send_loan_notification
+from datetime import timedelta
+from django.db import connection
 
 class AuthorViewSet(viewsets.ModelViewSet):
     queryset = Author.objects.all()
     serializer_class = AuthorSerializer
 
 class BookViewSet(viewsets.ModelViewSet):
-    queryset = Book.objects.all()
     serializer_class = BookSerializer
+
+    def get_queryset(self):
+        return Book.objects.select_related('author').all()
+    
+    def list(self, request, *args, **kwargs):
+        initial_queries = len(connection.queries)
+        response = super().list(request, *args, **kwargs)
+
+        final_queries = len(connection.queries)
+        query_count = final_queries - initial_queries
+
+        return response
+
 
     @action(detail=True, methods=['post'])
     def loan(self, request, pk=None):
@@ -52,3 +66,49 @@ class MemberViewSet(viewsets.ModelViewSet):
 class LoanViewSet(viewsets.ModelViewSet):
     queryset = Loan.objects.all()
     serializer_class = LoanSerializer
+
+    @action(detail=True, methods=['post'])
+    def extend_due_date(self, request, pk=None):
+        loan = self.get_object()
+
+        if loan.is_returned:
+            return Response(
+                {'error': 'error'},
+                status = status.HTTP_400_BAD_REQUEST
+            )
+        additional_days = request.data.get('additional_days')
+
+        if additional_days is None:
+            return Response(
+                {'error': 'error'},
+                status = status.HTTP_400_BAD_REQUEST
+            )
+        try:
+            additional_days = int(additional_days)
+        except (ValueError, TypeError):
+            return Response(
+                {'error': 'error'},
+                status = status.HTTP_400_BAD_REQUEST
+            )
+        
+        if additional_days <= 0:
+            return Response(
+                {'error': 'error'},
+                status = status.HTTP_400_BAD_REQUEST
+            )
+        
+        old_due_date = loan.due_date
+        loan.due_date = loan.due_date + timedelta(days=additional_days)
+        loan.save()
+
+
+        serializer = self.get_serializer(loan)
+        return Response(
+                {
+                    'message': f'Due date extended by {additional_days} days',
+                    'old_due_date': old_due_date,
+                    'new_due_date': loan.due_date,
+                    'loan': serializer.data
+                },
+                status=status.HTTP_200_OK
+            )
